@@ -16,24 +16,39 @@ jobs:
   run-vm:
     runs-on: ubuntu-latest
     env:
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
 
     steps:
+      - name: Send Start Info
+        run: |
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**Drives:** 5\"}"
+
       - name: Setup Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify unzip
+          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
           curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Download Windows ISO
         run: |
           wget -O "${{ github.event.inputs.vm_name }}.iso" "${{ github.event.inputs.iso_url }}"
-          echo "✅ ISO downloaded."
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"✅ ISO downloaded."}'
 
       - name: Create 256GB Disk
         run: |
           qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" 256G
-          echo "✅ Disk created."
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"📦 Virtual disk created (256G)."}'
 
       - name: Start Tailscale
         run: |
@@ -42,26 +57,10 @@ jobs:
           sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname="${{ github.event.inputs.vm_name }}" --accept-routes
           TS_IP=$(tailscale ip -4 | head -n 1)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale IP: $TS_IP"
-
-      - name: Start Playit.gg Agent (no config, no spam)
-        run: |
-          curl -LO https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux.zip
-          unzip playit-linux.zip
-          chmod +x playit
-
-          echo "🔄 Starting Playit.gg agent..."
-          ./playit > playit.log 2>&1 &
-          sleep 5
-
-          echo "🔍 Searching for claim link..."
-          CLAIM_URL=$(grep -o 'https://playit.gg/agent/claim/[a-zA-Z0-9-]*' playit.log | head -n 1)
-
-          if [ -n "$CLAIM_URL" ]; then
-            echo "✅ Claim your Playit agent here: $CLAIM_URL"
-          else
-            echo "❌ No claim link found. Check playit.log manually."
-          fi
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"🔌 Tailscale connected: \`$TS_IP\`\"}"
 
       - name: Launch VM and Hold Job
         run: |
@@ -92,7 +91,18 @@ jobs:
             -device usb-tablet,bus=ehci.0 &
 
           sleep 10
+
           nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
-          echo "🌐 This vm is public for anyone to use simply click on the link. VNC on port 6080, RDP on 3389 (via Playit)."
+
+          VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"🚀 VM Started! Connect via VNC and install Windows:\n🔹 **Tailscale IP:** \`$TAILSCALE_IP\`\n🔹 **noVNC:** $VNC_LINK\n👤 Owner: @Danielreal64\"}"
+
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
 
           timeout 21600 bash -c "while true; do sleep 30; done"
