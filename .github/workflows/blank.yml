@@ -11,58 +11,63 @@ on:
         description: 'Name of the VM/disk'
         required: true
         default: 'windowsserver'
+      tg_bot_token:
+        description: 'Telegram Bot Token'
+        required: true
+      tg_chat_id:
+        description: 'Telegram Chat ID'
+        required: true
 
 jobs:
   run-vm:
     runs-on: ubuntu-latest
-    env:
-      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-      DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
 
     steps:
-      - name: Send Start Info
+      - name: Send Start Info to Telegram
         run: |
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**Drives:** 5\"}"
+          curl -s -X POST "https://api.telegram.org/bot${{ github.event.inputs.tg_bot_token }}/sendMessage" \
+            -d chat_id="${{ github.event.inputs.tg_chat_id }}" \
+            -d text="🚀 *VM Starting...*\nOS ISO: *${{ github.event.inputs.iso_url }}*\nVM Name: *${{ github.event.inputs.vm_name }}*\nDrives: 5" \
+            -d parse_mode=Markdown
 
-      - name: Setup Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
+          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify unzip
           curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Download Windows ISO
+      - name: Download ISO
         run: |
           wget -O "${{ github.event.inputs.vm_name }}.iso" "${{ github.event.inputs.iso_url }}"
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"✅ ISO downloaded."}'
+          curl -s -X POST "https://api.telegram.org/bot${{ github.event.inputs.tg_bot_token }}/sendMessage" \
+            -d chat_id="${{ github.event.inputs.tg_chat_id }}" \
+            -d text="✅ Windows ISO downloaded."
 
-      - name: Create 256GB Disk
+      - name: Create Disk
         run: |
           qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" 256G
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"📦 Virtual disk created (256G)."}'
+          curl -s -X POST "https://api.telegram.org/bot${{ github.event.inputs.tg_bot_token }}/sendMessage" \
+            -d chat_id="${{ github.event.inputs.tg_chat_id }}" \
+            -d text="💽 Virtual disk created (256G)."
 
-      - name: Start Tailscale
+      - name: Start Tailscale and Send Auth Link
         run: |
           sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
           sleep 5
-          sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname="${{ github.event.inputs.vm_name }}" --accept-routes
-          TS_IP=$(tailscale ip -4 | head -n 1)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"🔌 Tailscale connected: \`$TS_IP\`\"}"
+          AUTH_OUTPUT=$(sudo tailscale up 2>&1 || true)
 
-      - name: Launch VM and Hold Job
+          # Extract and send auth URL
+          AUTH_URL=$(echo "$AUTH_OUTPUT" | grep -o 'https://login.tailscale.com/a/[a-zA-Z0-9]*' || true)
+          if [ -n "$AUTH_URL" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ github.event.inputs.tg_bot_token }}/sendMessage" \
+              -d chat_id="${{ github.event.inputs.tg_chat_id }}" \
+              -d text="🔐 *Tailscale Login Required:*\n$AUTH_URL" \
+              -d parse_mode=Markdown
+          else
+            echo "No Tailscale auth URL found."
+          fi
+
+      - name: Start VM and Web Interface
         run: |
           if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
             CODE_PATH=/usr/share/OVMF/OVMF_CODE_4M.fd
@@ -94,15 +99,14 @@ jobs:
 
           nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
-          VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"🚀 VM Started! Connect via VNC and install Windows:\n🔹 **Tailscale IP:** \`$TAILSCALE_IP\`\n🔹 **noVNC:** $VNC_LINK\n👤 Owner: @Danielreal64\"}"
+          curl -s -X POST "https://api.telegram.org/bot${{ github.event.inputs.tg_bot_token }}/sendMessage" \
+            -d chat_id="${{ github.event.inputs.tg_chat_id }}" \
+            -d text="🖥️ *VM Launched!*\n🔧 VNC: localhost:6080\n🖱 RDP: localhost:3389\n⚠️ Expose ports with your tunnel or use Tailscale." \
+            -d parse_mode=Markdown
 
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
+          curl -s -X POST "https://api.telegram.org/bot${{ github.event.inputs.tg_bot_token }}/sendMessage" \
+            -d chat_id="${{ github.event.inputs.tg_chat_id }}" \
+            -d text="⏳ Workflow will stay active for 6 hours." \
+            -d parse_mode=Markdown
 
           timeout 21600 bash -c "while true; do sleep 30; done"
