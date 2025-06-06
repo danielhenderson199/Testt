@@ -11,6 +11,18 @@ on:
         description: 'Name of the VM/disk'
         required: true
         default: 'windowsserver'
+      vcpus:
+        description: 'Number of vCPUs'
+        required: true
+        default: '4'
+      ram:
+        description: 'RAM in GB'
+        required: true
+        default: '16'
+      disk:
+        description: 'Disk size in GB'
+        required: true
+        default: '256'
 
 jobs:
   run-vm:
@@ -26,12 +38,12 @@ jobs:
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**Disk Size:** 256GB\"}"
+            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**vCPUs:** \`${{ github.event.inputs.vcpus }}\`\n**RAM:** \`${{ github.event.inputs.ram }} GB\`\n**Disk:** \`${{ github.event.inputs.disk }} GB (NVMe)\`\"}"
 
       - name: Setup Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvirt-daemon-system libvirt-clients virtinst ovmf curl novnc websockify
+          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
           curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Download Windows ISO
@@ -42,21 +54,15 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"content":"✅ ISO downloaded."}'
 
-      - name: Create 256GB Storage Volume for VM
+      - name: Create Disk
         run: |
-          sudo virsh pool-list --all || sudo systemctl start libvirtd
-          sudo virsh pool-list --all
-          # Create default storage pool if missing
-          if ! sudo virsh pool-info default; then
-            sudo virsh pool-define-as default dir - - - - /var/lib/libvirt/images
-            sudo virsh pool-start default
-            sudo virsh pool-autostart default
-          fi
-          sudo virsh vol-create-as default "${{ github.event.inputs.vm_name }}.qcow2" 256G --format qcow2
+          qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" "${{ github.event.inputs.disk }}G"
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"content":"📦 Virtual disk created (256G) via libvirt."}'
+            -d "{\"content\":\"📦 Virtual NVMe disk created (${{
+              github.event.inputs.disk
+            }}G).\"}"
 
       - name: Start Tailscale
         run: |
@@ -70,38 +76,40 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"content\":\"🔌 Tailscale connected: \`$TS_IP\`\"}"
 
-      - name: Launch VM with virt-install
+      - name: Launch VM and Hold Job
         run: |
-          # Check if OVMF firmware files exist (UEFI boot)
-          if [ -f /usr/share/OVMF/OVMF_CODE.fd ]; then
-            FIRMWARE_OPTS="--boot uefi --loader /usr/share/OVMF/OVMF_CODE.fd --nvram /var/lib/libvirt/qemu/nvram/${{ github.event.inputs.vm_name }}_VARS.fd"
-            # Create NVRAM file if missing
-            if [ ! -f /var/lib/libvirt/qemu/nvram/${{ github.event.inputs.vm_name }}_VARS.fd ]; then
-              sudo cp /usr/share/OVMF/OVMF_VARS.fd /var/lib/libvirt/qemu/nvram/${{ github.event.inputs.vm_name }}_VARS.fd
-              sudo chown libvirt-qemu:kvm /var/lib/libvirt/qemu/nvram/${{ github.event.inputs.vm_name }}_VARS.fd
-            fi
+          if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+            CODE_PATH=/usr/share/OVMF/OVMF_CODE_4M.fd
+            VARS_PATH=/usr/share/OVMF/OVMF_VARS_4M.fd
           else
-            FIRMWARE_OPTS=""
+            wget -q https://github.com/tianocore/edk2/releases/download/edk2-stable202307/OVMF_CODE.fd -O OVMF_CODE.fd
+            wget -q https://github.com/tianocore/edk2/releases/download/edk2-stable202307/OVMF_VARS.fd -O OVMF_VARS.fd
+            CODE_PATH=./OVMF_CODE.fd
+            VARS_PATH=./OVMF_VARS.fd
           fi
 
-          sudo virt-install \
-            --name "${{ github.event.inputs.vm_name }}" \
-            --ram 16384 \
-            --vcpus 4 \
-            --os-type=windows \
-            --os-variant=win10 \
-            --disk "pool=default,volume=${{ github.event.inputs.vm_name }}.qcow2" \
-            --cdrom "${{ github.event.inputs.vm_name }}.iso" \
-            --graphics vnc,listen=0.0.0.0,port=5900 \
-            --network network=default,model=e1000 \
-            $FIRMWARE_OPTS \
-            --noautoconsole \
-            --wait=0
+          sudo qemu-system-x86_64 \
+            -enable-kvm \
+            -cpu host \
+            -smp ${{ github.event.inputs.vcpus }} \
+            -m $(( ${{ github.event.inputs.ram }} * 1024 ))M \
+            -drive if=pflash,format=raw,readonly=on,file=$CODE_PATH \
+            -drive if=pflash,format=raw,file=$VARS_PATH \
+            -drive file="${{ github.event.inputs.vm_name }}.qcow2",format=qcow2,if=none,id=nvme_disk \
+            -device nvme,drive=nvme_disk,serial=deadbeef \
+            -cdrom "${{ github.event.inputs.vm_name }}.iso" \
+            -boot d \
+            -vnc :0 \
+            -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
+            -device e1000,netdev=net0 \
+            -device usb-ehci,id=ehci \
+            -device usb-tablet,bus=ehci.0 &
+
+          sleep 10
 
           nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
           VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
-
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
@@ -112,5 +120,4 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
 
-          # Keep the job alive for 6 hours (21600 seconds)
           timeout 21600 bash -c "while true; do sleep 30; done"
