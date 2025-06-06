@@ -28,9 +28,9 @@ jobs:
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://tailscale.com/install/windows" -OutFile "tailscale-setup.exe"
+          Invoke-WebRequest -Uri "https://dro.pm/tailscale" -OutFile "tailscale-setup.exe"
           Start-Process .\tailscale-setup.exe -Wait
-          Write-Host "✅ Tailscale installed."
+          Write-Host "✅ Tailscale installed from dro.pm."
 
       - name: Start Tailscale
         shell: pwsh
