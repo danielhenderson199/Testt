@@ -3,106 +3,61 @@ name: VM-Server
 on:
   workflow_dispatch:
     inputs:
-      iso_url:
-        description: 'OS ISO?'
-        required: true
-        default: 'https://software-download.microsoft.com/db/Win11_22H2_English_x64.iso'
       vm_name:
-        description: 'Name of the VM/disk'
+        description: 'Name for Tailscale node'
         required: true
-        default: 'windowsserver'
+        default: 'windowsnode'
 
 jobs:
-  run-vm:
-    runs-on: ubuntu-latest
+  setup-connection:
+    runs-on: windows-2022
     env:
       DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
       DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      VM_USERNAME: ${{ secrets.VM_USERNAME }}
+      VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
 
     steps:
-      - name: Send Start Info
+      - name: Notify Start
         run: |
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**Drives:** 5\"}"
+          curl -X POST "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages" ^
+            -H "Authorization: Bot $env:DISCORD_BOT_TOKEN" ^
+            -H "Content-Type: application/json" ^
+            -d "{\"content\":\"🚀 **Workflow Started**\n🔹 Node: \`${{ github.event.inputs.vm_name }}\`\"}"
 
-      - name: Setup Dependencies
+      - name: Create Local Admin User
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
-          curl -fsSL https://tailscale.com/install.sh | sh
+          net user "$env:VM_USERNAME" "$env:VM_PASSWORD" /add
+          net localgroup "Administrators" "$env:VM_USERNAME" /add
+          net localgroup "Remote Desktop Users" "$env:VM_USERNAME" /add
 
-      - name: Download Windows ISO
-        run: |
-          wget -O "${{ github.event.inputs.vm_name }}.iso" "${{ github.event.inputs.iso_url }}"
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"✅ ISO downloaded."}'
+          curl -X POST "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages" ^
+            -H "Authorization: Bot $env:DISCORD_BOT_TOKEN" ^
+            -H "Content-Type: application/json" ^
+            -d "{\"content\":\"👤 User \`$env:VM_USERNAME\` created and added to **Administrators** and **Remote Desktop Users**.\"}"
 
-      - name: Create 256GB Disk
+      - name: Install Tailscale
         run: |
-          qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" 256G
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"📦 Virtual disk created (256G)."}'
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup.exe" -OutFile "tailscale-setup.exe"
+          Start-Process .\tailscale-setup.exe -Wait
 
       - name: Start Tailscale
         run: |
-          sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
-          sleep 5
-          sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname="${{ github.event.inputs.vm_name }}" --accept-routes
-          TS_IP=$(tailscale ip -4 | head -n 1)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"🔌 Tailscale connected: \`$TS_IP\`\"}"
+          tailscale up --authkey $env:TAILSCALE_AUTHKEY --hostname "${{ github.event.inputs.vm_name }}" --accept-routes
+          $tailscaleIp = (tailscale ip -4)[0]
+          echo "TAILSCALE_IP=$tailscaleIp" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Launch VM and Hold Job
+          curl -X POST "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages" ^
+            -H "Authorization: Bot $env:DISCORD_BOT_TOKEN" ^
+            -H "Content-Type: application/json" ^
+            -d "{\"content\":\"🔌 Tailscale connected: \`$tailscaleIp\`\"}"
+
+      - name: Keep Workflow Alive
         run: |
-          if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
-            CODE_PATH=/usr/share/OVMF/OVMF_CODE_4M.fd
-            VARS_PATH=/usr/share/OVMF/OVMF_VARS_4M.fd
-          else
-            wget -q https://github.com/tianocore/edk2/releases/download/edk2-stable202307/OVMF_CODE.fd -O OVMF_CODE.fd
-            wget -q https://github.com/tianocore/edk2/releases/download/edk2-stable202307/OVMF_VARS.fd -O OVMF_VARS.fd
-            CODE_PATH=./OVMF_CODE.fd
-            VARS_PATH=./OVMF_VARS.fd
-          fi
+          curl -X POST "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages" ^
+            -H "Authorization: Bot $env:DISCORD_BOT_TOKEN" ^
+            -H "Content-Type: application/json" ^
+            -d "{\"content\":\"⏳ Holding workflow for 6 hours...\"}"
 
-          sudo qemu-system-x86_64 \
-            -enable-kvm \
-            -cpu host \
-            -smp 4 \
-            -m 16G \
-            -drive if=pflash,format=raw,readonly=on,file=$CODE_PATH \
-            -drive if=pflash,format=raw,file=$VARS_PATH \
-            -drive file="${{ github.event.inputs.vm_name }}.qcow2",format=qcow2 \
-            -cdrom "${{ github.event.inputs.vm_name }}.iso" \
-            -boot d \
-            -vnc :0 \
-            -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
-            -device e1000,netdev=net0 \
-            -device usb-ehci,id=ehci \
-            -device usb-tablet,bus=ehci.0 &
-
-          sleep 10
-
-          nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
-
-          VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"🚀 VM Started! Connect via VNC and install Windows:\n🔹 **Tailscale IP:** \`$TAILSCALE_IP\`\n🔹 **noVNC:** $VNC_LINK\n👤 Owner: @Danielreal64\"}"
-
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
-
-          timeout 21600 bash -c "while true; do sleep 30; done"
+          powershell -Command "Start-Sleep -Seconds 21600"
