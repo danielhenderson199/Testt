@@ -23,12 +23,14 @@ jobs:
           net user "$env:VM_USERNAME" "$env:VM_PASSWORD" /add
           net localgroup "Administrators" "$env:VM_USERNAME" /add
           net localgroup "Remote Desktop Users" "$env:VM_USERNAME" /add
+          Write-Host "✅ User '$env:VM_USERNAME' created and added to Administrators + RDP users."
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup.exe" -OutFile "tailscale-setup.exe"
+          Invoke-WebRequest -Uri "https://tailscale.com/install/windows" -OutFile "tailscale-setup.exe"
           Start-Process .\tailscale-setup.exe -Wait
+          Write-Host "✅ Tailscale installed."
 
       - name: Start Tailscale
         shell: pwsh
@@ -36,8 +38,10 @@ jobs:
           tailscale up --authkey "$env:TAILSCALE_AUTHKEY" --hostname "${{ github.event.inputs.vm_name }}" --accept-routes
           $tailscaleIp = (tailscale ip -4)[0]
           "TAILSCALE_IP=$tailscaleIp" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "🔌 Tailscale IP: $tailscaleIp"
 
       - name: Keep Workflow Alive
         shell: pwsh
         run: |
+          Write-Host "⏳ Holding job active for 6 hours..."
           Start-Sleep -Seconds 21600
