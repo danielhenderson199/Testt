@@ -12,42 +12,17 @@ jobs:
   setup-connection:
     runs-on: windows-2022
     env:
-      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-      DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       VM_USERNAME: ${{ secrets.VM_USERNAME }}
       VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
 
     steps:
-      - name: Notify Start
-        shell: pwsh
-        run: |
-          $uri = "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages"
-          $headers = @{
-            "Authorization" = "Bot $env:DISCORD_BOT_TOKEN"
-            "Content-Type"  = "application/json"
-          }
-          $body = @{
-            content = "🚀 **Workflow Started**`n🔹 Node: `$${{ github.event.inputs.vm_name }}"
-          } | ConvertTo-Json -Compress
-          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
-
       - name: Create Local Admin User
         shell: pwsh
         run: |
           net user "$env:VM_USERNAME" "$env:VM_PASSWORD" /add
           net localgroup "Administrators" "$env:VM_USERNAME" /add
           net localgroup "Remote Desktop Users" "$env:VM_USERNAME" /add
-
-          $uri = "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages"
-          $headers = @{
-            "Authorization" = "Bot $env:DISCORD_BOT_TOKEN"
-            "Content-Type"  = "application/json"
-          }
-          $body = @{
-            content = "👤 User `$env:VM_USERNAME created and added to **Administrators** and **Remote Desktop Users**."
-          } | ConvertTo-Json -Compress
-          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
 
       - name: Install Tailscale
         shell: pwsh
@@ -62,27 +37,7 @@ jobs:
           $tailscaleIp = (tailscale ip -4)[0]
           "TAILSCALE_IP=$tailscaleIp" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-          $uri = "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages"
-          $headers = @{
-            "Authorization" = "Bot $env:DISCORD_BOT_TOKEN"
-            "Content-Type"  = "application/json"
-          }
-          $body = @{
-            content = "🔌 Tailscale connected: `$tailscaleIp"
-          } | ConvertTo-Json -Compress
-          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
-
       - name: Keep Workflow Alive
         shell: pwsh
         run: |
-          $uri = "https://discord.com/api/v10/channels/$env:DISCORD_CHANNEL_ID/messages"
-          $headers = @{
-            "Authorization" = "Bot $env:DISCORD_BOT_TOKEN"
-            "Content-Type"  = "application/json"
-          }
-          $body = @{
-            content = "⏳ Holding workflow for 6 hours..."
-          } | ConvertTo-Json -Compress
-          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
-
           Start-Sleep -Seconds 21600
