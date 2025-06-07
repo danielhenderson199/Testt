@@ -2,70 +2,77 @@
 
 set -e
 
-# VMware download link for Workstation Pro (v17.5.0)
 VMWARE_URL="https://download3.vmware.com/software/wkst/file/VMware-Workstation-Full-17.5.0-22583795.x86_64.bundle"
 BUNDLE_NAME="VMware-Workstation-Full-17.5.0-22583795.x86_64.bundle"
 
-# Function to check if the script is run as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        echo "❌ Please run this script as root (use sudo)."
+        echo "❌ Please run as root (sudo)."
         exit 1
     fi
 }
 
-# Try to install the correct Linux headers
-install_headers() {
-    KERNEL_VERSION=$(uname -r)
-    echo "🔍 Kernel version detected: $KERNEL_VERSION"
+install_standard_kernel() {
+    echo "🛠 Installing standard generic kernel and headers..."
+    apt update
+    apt install -y linux-image-generic linux-headers-generic
+    echo "✅ Standard kernel installed. Please reboot and re-run this script."
+    exit 0
+}
 
-    echo "📦 Attempting to install kernel headers for $KERNEL_VERSION..."
-    if apt-get install -y "linux-headers-$KERNEL_VERSION"; then
-        echo "✅ Kernel headers installed successfully."
-    else
-        echo "⚠️ Could not install linux-headers-$KERNEL_VERSION"
-        echo "👉 Trying generic headers instead..."
-        apt-get install -y linux-headers-generic || {
-            echo "❌ Failed to install linux headers. You may be on a custom kernel."
-            echo "➡️ Manual fix: Download and install matching headers from your distro's kernel repo."
+install_dependencies() {
+    echo "📦 Installing build tools and DKMS..."
+    apt update
+    apt install -y build-essential dkms wget
+}
+
+install_headers() {
+    KERNEL=$(uname -r)
+    echo "🔍 Installing linux-headers for kernel: $KERNEL"
+    if ! apt install -y "linux-headers-$KERNEL"; then
+        echo "⚠️ Headers for current kernel not found."
+        echo "➡️ Installing generic linux-headers instead..."
+        apt install -y linux-headers-generic || {
+            echo "❌ Failed to install linux headers."
             exit 1
         }
     fi
 }
 
-# Install required build dependencies
-install_dependencies() {
-    echo "🔧 Installing required packages..."
-    apt update
-    apt install -y build-essential dkms wget
-    install_headers
-}
-
-# Download the VMware bundle
 download_vmware() {
     echo "⬇️ Downloading VMware Workstation Pro..."
     wget -O "$BUNDLE_NAME" "$VMWARE_URL"
     chmod +x "$BUNDLE_NAME"
 }
 
-# Run the installer
 install_vmware() {
-    echo "🚀 Running the VMware installer..."
+    echo "🚀 Installing VMware Workstation Pro..."
     ./"$BUNDLE_NAME" --required --eulas-agreed
 }
 
-# Final message
-post_install() {
+check_vmware() {
     if command -v vmware &>/dev/null; then
         echo "✅ VMware Workstation Pro installed successfully!"
     else
-        echo "⚠️ VMware may not be in PATH or the install may have failed."
+        echo "⚠️ VMware installation might have failed."
     fi
 }
 
-# Run all steps
-check_root
-install_dependencies
-download_vmware
-install_vmware
-post_install
+main() {
+    check_root
+
+    # Check if running standard kernel or custom kernel
+    KERNEL_VERSION=$(uname -r)
+    if ! apt-cache search linux-headers-"$KERNEL_VERSION" | grep -q linux-headers; then
+        echo "⚠️ Kernel headers for $KERNEL_VERSION not found in repo."
+        install_standard_kernel
+    fi
+
+    install_dependencies
+    install_headers
+    download_vmware
+    install_vmware
+    check_vmware
+}
+
+main
