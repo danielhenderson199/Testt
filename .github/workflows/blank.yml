@@ -1,78 +1,123 @@
-#!/bin/bash
+name: VM-Server
 
-set -e
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: 'OS ISO?'
+        required: true
+        default: 'https://software-download.microsoft.com/db/Win11_22H2_English_x64.iso'
+      vm_name:
+        description: 'Name of the VM/disk'
+        required: true
+        default: 'windowsserver'
+      vcpus:
+        description: 'Number of vCPUs'
+        required: true
+        default: '4'
+      ram:
+        description: 'RAM in GB'
+        required: true
+        default: '16'
+      disk:
+        description: 'Disk size in GB'
+        required: true
+        default: '256'
 
-VMWARE_URL="https://download3.vmware.com/software/wkst/file/VMware-Workstation-Full-17.5.0-22583795.x86_64.bundle"
-BUNDLE_NAME="VMware-Workstation-Full-17.5.0-22583795.x86_64.bundle"
+jobs:
+  run-vm:
+    runs-on: ubuntu-latest
+    env:
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo "❌ Please run as root (sudo)."
-        exit 1
-    fi
-}
+    steps:
+      - name: Send Start Info
+        run: |
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**vCPUs:** \`${{ github.event.inputs.vcpus }}\`\n**RAM:** \`${{ github.event.inputs.ram }} GB\`\n**Disk:** \`${{ github.event.inputs.disk }} GB (NVMe)\`\"}"
 
-install_standard_kernel() {
-    echo "🛠 Installing standard generic kernel and headers..."
-    apt update
-    apt install -y linux-image-generic linux-headers-generic
-    echo "✅ Standard kernel installed. Please reboot and re-run this script."
-    exit 0
-}
+      - name: Setup Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-install_dependencies() {
-    echo "📦 Installing build tools and DKMS..."
-    apt update
-    apt install -y build-essential dkms wget
-}
+      - name: Download Windows ISO
+        run: |
+          wget -O "${{ github.event.inputs.vm_name }}.iso" "${{ github.event.inputs.iso_url }}"
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"the vm iso has been downloaded."}'
 
-install_headers() {
-    KERNEL=$(uname -r)
-    echo "🔍 Installing linux-headers for kernel: $KERNEL"
-    if ! apt install -y "linux-headers-$KERNEL"; then
-        echo "⚠️ Headers for current kernel not found."
-        echo "➡️ Installing generic linux-headers instead..."
-        apt install -y linux-headers-generic || {
-            echo "❌ Failed to install linux headers."
-            exit 1
-        }
-    fi
-}
+      - name: Create Disk
+        run: |
+          qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" "${{ github.event.inputs.disk }}G"
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"Disk Has Been Created (${{
+              github.event.inputs.disk
+            }}G).\"}"
 
-download_vmware() {
-    echo "⬇️ Downloading VMware Workstation Pro..."
-    wget -O "$BUNDLE_NAME" "$VMWARE_URL"
-    chmod +x "$BUNDLE_NAME"
-}
+      - name: Start Tailscale
+        run: |
+          sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
+          sleep 5
+          sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname="${{ github.event.inputs.vm_name }}" --accept-routes
+          TS_IP=$(tailscale ip -4 | head -n 1)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"Daniel's Tailscale Has been connected on vm\`$TS_IP\`\"}"
 
-install_vmware() {
-    echo "🚀 Installing VMware Workstation Pro..."
-    ./"$BUNDLE_NAME" --required --eulas-agreed
-}
+      - name: Launch VM and Hold Job
+        run: |
+          if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+            CODE_PATH=/usr/share/OVMF/OVMF_CODE_4M.fd
+            VARS_PATH=/usr/share/OVMF/OVMF_VARS_4M.fd
+          else
+            wget -q https://github.com/tianocore/edk2/releases/download/edk2-stable202307/OVMF_CODE.fd -O OVMF_CODE.fd
+            wget -q https://github.com/tianocore/edk2/releases/download/edk2-stable202307/OVMF_VARS.fd -O OVMF_VARS.fd
+            CODE_PATH=./OVMF_CODE.fd
+            VARS_PATH=./OVMF_VARS.fd
+          fi
 
-check_vmware() {
-    if command -v vmware &>/dev/null; then
-        echo "✅ VMware Workstation Pro installed successfully!"
-    else
-        echo "⚠️ VMware installation might have failed."
-    fi
-}
+          sudo qemu-system-x86_64 \
+            -enable-kvm \
+            -cpu host \
+            -smp ${{ github.event.inputs.vcpus }} \
+            -m $(( ${{ github.event.inputs.ram }} * 1024 ))M \
+            -drive if=pflash,format=raw,readonly=on,file=$CODE_PATH \
+            -drive if=pflash,format=raw,file=$VARS_PATH \
+            -drive file="${{ github.event.inputs.vm_name }}.qcow2",format=qcow2,if=none,id=nvme_disk \
+            -device nvme,drive=nvme_disk,serial=deadbeef \
+            -cdrom "${{ github.event.inputs.vm_name }}.iso" \
+            -boot d \
+            -vnc :0 \
+            -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
+            -device e1000,netdev=net0 \
+            -device usb-ehci,id=ehci \
+            -device usb-tablet,bus=ehci.0 &
 
-main() {
-    check_root
+          sleep 10
 
-    # Check if running standard kernel or custom kernel
-    KERNEL_VERSION=$(uname -r)
-    if ! apt-cache search linux-headers-"$KERNEL_VERSION" | grep -q linux-headers; then
-        echo "⚠️ Kernel headers for $KERNEL_VERSION not found in repo."
-        install_standard_kernel
-    fi
+          nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
-    install_dependencies
-    install_headers
-    download_vmware
-    install_vmware
-    check_vmware
-}
+          VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"🚀 VM Started! Connect via VNC and install Windows:\n🔹 **Tailscale IP:** \`$TAILSCALE_IP\`\n🔹 **noVNC:** $VNC_LINK\n👤 Owner: @Danielreal64\"}"
 
-main
+          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
+
+          timeout 21600 bash -c "while true; do sleep 30; done"
