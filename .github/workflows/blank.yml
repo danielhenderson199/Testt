@@ -1,31 +1,23 @@
-name: VM-Server
+name: VM-Server-AutoInstall
 
 on:
   workflow_dispatch:
     inputs:
       iso_url:
-        description: 'OS ISO?'
+        description: 'Windows ISO URL'
         required: true
         default: 'https://software-download.microsoft.com/db/Win11_22H2_English_x64.iso'
       vm_name:
-        description: 'Name of the VM/disk'
+        description: 'VM/Disk name'
         required: true
         default: 'windowsserver'
-      vcpus:
-        description: 'Number of vCPUs'
+      product_key:
+        description: 'Product Key'
         required: true
-        default: '4'
-      ram:
-        description: 'RAM in GB'
-        required: true
-        default: '16'
-      disk:
-        description: 'Disk size in GB'
-        required: true
-        default: '256'
+        default: 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
 
 jobs:
-  run-vm:
+  autoinstall-windows:
     runs-on: ubuntu-latest
     env:
       DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
@@ -38,45 +30,98 @@ jobs:
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**vCPUs:** \`${{ github.event.inputs.vcpus }}\`\n**RAM:** \`${{ github.event.inputs.ram }} GB\`\n**Disk:** \`${{ github.event.inputs.disk }} GB (NVMe)\`\"}"
+            -d "{\"content\":\"🛠️ **Starting Auto Windows Install**\nISO: \`${{ github.event.inputs.iso_url }}\`\nVM: \`${{ github.event.inputs.vm_name }}\`\n🔑 Product Key: \`${{ github.event.inputs.product_key }}\``}"
 
-      - name: Setup Dependencies
+      - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
-          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo apt-get install -y qemu-utils qemu-system-x86 genisoimage curl unzip p7zip-full ovmf novnc websockify
 
-      - name: Download Windows ISO
+      - name: Download and Mount Windows ISO
         run: |
-          wget -O "${{ github.event.inputs.vm_name }}.iso" "${{ github.event.inputs.iso_url }}"
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"the vm iso has been downloaded."}'
+          wget -O win.iso "${{ github.event.inputs.iso_url }}"
+          mkdir -p iso mnt build
+          sudo 7z x -oiso win.iso
 
-      - name: Create Disk
+      - name: Create Autounattend.xml
         run: |
-          qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" "${{ github.event.inputs.disk }}G"
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"Disk Has Been Created (${{
-              github.event.inputs.disk
-            }}G).\"}"
+          cat > iso/autounattend.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <unattend xmlns="urn:schemas-microsoft-com:unattend">
+            <settings pass="windowsPE">
+              <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+                <ImageInstall>
+                  <OSImage>
+                    <InstallFrom>
+                      <MetaData wcm:action="add">
+                        <Key>/IMAGE/INDEX</Key>
+                        <Value>6</Value> <!-- Pro edition -->
+                      </MetaData>
+                    </InstallFrom>
+                    <InstallTo>
+                      <DiskID>0</DiskID>
+                      <PartitionID>1</PartitionID>
+                    </InstallTo>
+                  </OSImage>
+                </ImageInstall>
+                <UserData>
+                  <ProductKey>
+                    <Key>${{ github.event.inputs.product_key }}</Key>
+                    <WillShowUI>Never</WillShowUI>
+                  </ProductKey>
+                  <AcceptEula>true</AcceptEula>
+                  <FullName>AutoInstall</FullName>
+                  <Organization>GitHubActions</Organization>
+                </UserData>
+              </component>
+            </settings>
+            <settings pass="oobeSystem">
+              <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+                <OOBE>
+                  <HideEULAPage>true</HideEULAPage>
+                  <NetworkLocation>Work</NetworkLocation>
+                  <ProtectYourPC>1</ProtectYourPC>
+                </OOBE>
+                <UserAccounts>
+                  <AdministratorPassword>
+                    <Value>Passw0rd!</Value>
+                    <PlainText>true</PlainText>
+                  </AdministratorPassword>
+                </UserAccounts>
+                <AutoLogon>
+                  <Password>
+                    <Value>Passw0rd!</Value>
+                    <PlainText>true</PlainText>
+                  </Password>
+                  <Enabled>true</Enabled>
+                  <Username>Administrator</Username>
+                </AutoLogon>
+                <RegisteredOwner>AutoInstall</RegisteredOwner>
+                <TimeZone>UTC</TimeZone>
+              </component>
+            </settings>
+          </unattend>
+          EOF
+
+      - name: Rebuild ISO with Answer File
+        run: |
+          cp iso/autounattend.xml iso/
+          genisoimage -U -b "boot/etfsboot.com" \
+            -no-emul-boot -boot-load-size 8 -hide boot.catalog \
+            -o "autoinstall.iso" iso/
+
+      - name: Create Disk Image
+        run: qemu-img create -f qcow2 "${{ github.event.inputs.vm_name }}.qcow2" 256G
 
       - name: Start Tailscale
         run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
           sleep 5
           sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname="${{ github.event.inputs.vm_name }}" --accept-routes
-          TS_IP=$(tailscale ip -4 | head -n 1)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"Daniel's Tailscale Has been connected on vm\`$TS_IP\`\"}"
+          echo "TAILSCALE_IP=$(tailscale ip -4 | head -n 1)" >> $GITHUB_ENV
 
-      - name: Launch VM and Hold Job
+      - name: Boot VM with Auto-Install
         run: |
           if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
             CODE_PATH=/usr/share/OVMF/OVMF_CODE_4M.fd
@@ -90,14 +135,11 @@ jobs:
 
           sudo qemu-system-x86_64 \
             -enable-kvm \
-            -cpu host \
-            -smp ${{ github.event.inputs.vcpus }} \
-            -m $(( ${{ github.event.inputs.ram }} * 1024 ))M \
+            -cpu host -smp 4 -m 16G \
             -drive if=pflash,format=raw,readonly=on,file=$CODE_PATH \
             -drive if=pflash,format=raw,file=$VARS_PATH \
-            -drive file="${{ github.event.inputs.vm_name }}.qcow2",format=qcow2,if=none,id=nvme_disk \
-            -device nvme,drive=nvme_disk,serial=deadbeef \
-            -cdrom "${{ github.event.inputs.vm_name }}.iso" \
+            -drive file="${{ github.event.inputs.vm_name }}.qcow2",format=qcow2 \
+            -cdrom autoinstall.iso \
             -boot d \
             -vnc :0 \
             -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
@@ -106,18 +148,11 @@ jobs:
             -device usb-tablet,bus=ehci.0 &
 
           sleep 10
-
           nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
-          VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"content\":\"🚀 VM Started! Connect via VNC and install Windows:\n🔹 **Tailscale IP:** \`$TAILSCALE_IP\`\n🔹 **noVNC:** $VNC_LINK\n👤 Owner: @Danielreal64\"}"
-
-          curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
+            -d "{\"content\":\"✅ Auto-install VM started!\n🌐 VNC: http://$TAILSCALE_IP:6080/vnc.html\n🧑 Owner: @Danielreal64\"}"
 
           timeout 21600 bash -c "while true; do sleep 30; done"
