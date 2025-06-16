@@ -11,10 +11,6 @@ on:
         description: 'Name of the VM/disk'
         required: true
         default: 'windowsserver'
-      product_key:
-        description: 'Windows Product Key'
-        required: true
-        default: 'XXXXX-XXXXX-XXXXX-XXXXX-XXXXX'
 
 jobs:
   run-vm:
@@ -30,16 +26,12 @@ jobs:
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-{
-  "content": "🛠️ **Starting Auto Windows Install**\nISO: \`${{ github.event.inputs.iso_url }}\`\nVM: \`${{ github.event.inputs.vm_name }}\`\n🔑 Product Key: \`${{ github.event.inputs.product_key }}\`"
-}
-EOF
+            -d "{\"content\":\"**Starting VM Setup**\n**OS ISO:** \`${{ github.event.inputs.iso_url }}\`\n**VM Name:** \`${{ github.event.inputs.vm_name }}\`\n**Drives:** 5\"}"
 
       - name: Setup Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify genisoimage
+          sudo apt-get install -y qemu-system-x86 ovmf curl novnc websockify
           curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Download Windows ISO
@@ -48,11 +40,7 @@ EOF
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-{
-  "content": "✅ ISO downloaded."
-}
-EOF
+            -d '{"content":"✅ ISO downloaded."}'
 
       - name: Create 256GB Disk
         run: |
@@ -60,91 +48,7 @@ EOF
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-{
-  "content": "📦 Virtual disk created (256G)."
-}
-EOF
-
-      - name: Generate autounattend.xml
-        run: |
-          cat > autounattend.xml <<EOF
-<?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend">
-  <settings pass="windowsPE">
-    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-      <UserData>
-        <ProductKey>
-          <Key>${{ github.event.inputs.product_key }}</Key>
-          <WillShowUI>Never</WillShowUI>
-        </ProductKey>
-        <AcceptEula>true</AcceptEula>
-        <FullName>Administrator</FullName>
-        <Organization>AutoVM</Organization>
-      </UserData>
-      <ImageInstall>
-        <OSImage>
-          <InstallFrom>
-            <MetaData>
-              <Key>/IMAGE/INDEX</Key>
-              <Value>1</Value>
-            </MetaData>
-          </InstallFrom>
-          <InstallTo>
-            <DiskID>0</DiskID>
-            <PartitionID>1</PartitionID>
-          </InstallTo>
-          <WillShowUI>Never</WillShowUI>
-        </OSImage>
-      </ImageInstall>
-      <DiskConfiguration>
-        <Disk wcm:action="add">
-          <DiskID>0</DiskID>
-          <WillWipeDisk>true</WillWipeDisk>
-          <CreatePartitions>
-            <CreatePartition wcm:action="add">
-              <Order>1</Order>
-              <Type>Primary</Type>
-              <Size>100000</Size>
-            </CreatePartition>
-          </CreatePartitions>
-        </Disk>
-        <WillShowUI>Never</WillShowUI>
-      </DiskConfiguration>
-    </component>
-  </settings>
-  <settings pass="oobeSystem">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-      <OOBE>
-        <HideEULAPage>true</HideEULAPage>
-        <NetworkLocation>Work</NetworkLocation>
-        <ProtectYourPC>1</ProtectYourPC>
-      </OOBE>
-      <UserAccounts>
-        <AdministratorPassword>
-          <Value>Admin1234</Value>
-          <PlainText>true</PlainText>
-        </AdministratorPassword>
-      </UserAccounts>
-      <AutoLogon>
-        <Username>Administrator</Username>
-        <Password>
-          <Value>Admin1234</Value>
-          <PlainText>true</PlainText>
-        </Password>
-        <Enabled>true</Enabled>
-      </AutoLogon>
-      <RegisteredOwner>Daniel</RegisteredOwner>
-    </component>
-  </settings>
-</unattend>
-EOF
-
-      - name: Create autounattend.iso
-        run: |
-          mkdir -p iso_root
-          cp autounattend.xml iso_root/
-          genisoimage -o autounattend.iso -udf -b autounattend.xml iso_root
+            -d '{"content":"📦 Virtual disk created (256G)."}'
 
       - name: Start Tailscale
         run: |
@@ -153,15 +57,10 @@ EOF
           sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname="${{ github.event.inputs.vm_name }}" --accept-routes
           TS_IP=$(tailscale ip -4 | head -n 1)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-{
-  "content": "🔌 Tailscale connected: \`$TS_IP\`"
-}
-EOF
+            -d "{\"content\":\"🔌 Tailscale connected: \`$TS_IP\`\"}"
 
       - name: Launch VM and Hold Job
         run: |
@@ -183,9 +82,8 @@ EOF
             -drive if=pflash,format=raw,readonly=on,file=$CODE_PATH \
             -drive if=pflash,format=raw,file=$VARS_PATH \
             -drive file="${{ github.event.inputs.vm_name }}.qcow2",format=qcow2 \
-            -drive file="${{ github.event.inputs.vm_name }}.iso",media=cdrom \
-            -drive file=autounattend.iso,media=cdrom \
-            -boot order=d \
+            -cdrom "${{ github.event.inputs.vm_name }}.iso" \
+            -boot d \
             -vnc :0 \
             -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
             -device e1000,netdev=net0 \
@@ -193,25 +91,18 @@ EOF
             -device usb-tablet,bus=ehci.0 &
 
           sleep 10
+
           nohup websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
           VNC_LINK="http://$TAILSCALE_IP:6080/vnc.html"
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-{
-  "content": "🚀 VM Started! Windows is auto-installing...\n🌐 Tailscale: \`$TAILSCALE_IP\`\n🔗 VNC: $VNC_LINK\n👤 Owner: @Danielreal64"
-}
-EOF
+            -d "{\"content\":\"🚀 VM Started! Connect via VNC and install Windows:\n🔹 **Tailscale IP:** \`$TAILSCALE_IP\`\n🔹 **noVNC:** $VNC_LINK\n👤 Owner: @Danielreal64\"}"
 
           curl -X POST "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
             -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-{
-  "content": "⏳ Workflow will remain active for 6 hours while Windows installs automatically..."
-}
-EOF
+            -d '{"content":"⏳ Workflow will remain active for 6 hours..."}'
 
           timeout 21600 bash -c "while true; do sleep 30; done"
